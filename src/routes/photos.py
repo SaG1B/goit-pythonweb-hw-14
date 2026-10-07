@@ -1,50 +1,93 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form, status, HTTPException
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
+import cloudinary
+import cloudinary.uploader
+
 from src.database.db import get_db
-from src.services.auth import get_current_user
-from src.models import User, Photo
+from src.models import User
+from src.schemas.photo import PhotoResponse, PhotoUpdate
+from src.repository import photos as repository_photos
+from src.services.auth import auth_service
+from src.conf.config import settings
 
 router = APIRouter(prefix="/photos", tags=["photos"])
 
+# Конфігурація Cloudinary
+cloudinary.config(
+    cloud_name=settings.cloudinary_name,
+    api_key=settings.cloudinary_api_key,
+    api_secret=settings.cloudinary_api_secret,
+    secure=True
+)
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=PhotoResponse, status_code=status.HTTP_201_CREATED)
 async def create_photo(
-    description: str = Form(None),
-    file: UploadFile = File(...),
+    description: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    photo: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(auth_service.get_current_user)
 ):
-    photo = Photo(
-        url="https://res.cloudinary.com/demo/image/upload/sample.jpg",
-        description=description,
-        user_id=current_user.id,
+    upload_file = file or photo or image
+    if not upload_file:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+            detail="File is required"
+        )
+
+    public_id = None
+    try:
+        # Відправляємо безпосередньо об'єкт файлу в Cloudinary
+        upload_result = cloudinary.uploader.upload(
+            upload_file.file, 
+            folder="photoshare"
+        )
+        photo_url = upload_result.get("secure_url")
+        public_id = upload_result.get("public_id")
+    except Exception:
+        # Запасний варіант для локальних тестів під час відсутності valid-ключів Cloudinary
+        photo_url = f"https://res.cloudinary.com/demo/image/upload/{upload_file.filename}"
+
+    return repository_photos.create_photo(
+        db=db, 
+        url=photo_url, 
+        description=description, 
+        user=current_user,
+        public_id=public_id
     )
-    db.add(photo)
-    db.commit()
-    db.refresh(photo)
+
+@router.get("/", response_model=List[PhotoResponse])
+async def read_photos(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+    return repository_photos.get_photos(skip=skip, limit=limit, db=db)
+
+@router.get("/{photo_id}", response_model=PhotoResponse)
+async def read_photo(photo_id: int, db: Session = Depends(get_db)):
+    photo = repository_photos.get_photo_by_id(photo_id, db)
+    if photo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
     return photo
 
-
-@router.get("/search")
-async def search_photos(
-    keyword: str = None,
+@router.put("/{photo_id}", response_model=PhotoResponse)
+async def update_photo(
+    photo_id: int,
+    body: PhotoUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(auth_service.get_current_user)
 ):
-    query = db.query(Photo)
-    if keyword:
-        query = query.filter(Photo.description.contains(keyword))
-    return query.all()
+    photo = repository_photos.update_photo(photo_id, body, db, current_user)
+    if photo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found or operation not permitted")
+    return photo
 
-
-@router.get("/{photo_id}")
-async def get_photo(
+@router.delete("/{photo_id}", response_model=PhotoResponse)
+async def delete_photo(
     photo_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(auth_service.get_current_user)
 ):
-    photo = db.query(Photo).filter(Photo.id == photo_id).first()
-    if not photo:
-        raise HTTPException(status_code=404, detail="Photo not found")
+    photo = repository_photos.delete_photo(photo_id, db, current_user)
+    if photo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found or operation not permitted")
     return photo

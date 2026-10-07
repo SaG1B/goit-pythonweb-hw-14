@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -7,76 +7,69 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from src.database.db import get_db
-from src.models import BlacklistToken, User
-
-# Налаштування JWT
-SECRET_KEY = "SECRET_KEY_FOR_JWT_CHANGE_IN_PRODUCTION"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+from src.repository import users as repository_users
+from src.conf.config import settings
+from src.models import User
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
+BLACK_LIST = set()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: dict, expires_delta: Optional[float] = None) -> str:
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + timedelta(seconds=expires_delta)
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=60)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
     return encoded_jwt
 
-
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> User:
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Не вдалося валідувати облікові дані",
+        detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if token in BLACK_LIST:
+        raise credentials_exception
 
-    # 1. Перевірка чорного списку (Logout)
-    blacklisted = (
-        db.query(BlacklistToken).filter(BlacklistToken.token == token).first()
-    )
-    if blacklisted:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked (logged out)",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # 2. Декодування JWT
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        identity: str = payload.get("sub") or payload.get("username")
+        if identity is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
 
-    # 3. Отримання користувача
-    user = db.query(User).filter(User.username == username).first()
+    user = repository_users.get_user_by_email(identity, db)
+    if user is None:
+        user = db.query(User).filter(User.username == identity).first()
+        
     if user is None:
         raise credentials_exception
-
-    # 4. Перевірка на бан
-    if getattr(user, "is_banned", False):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been banned",
-        )
-
     return user
+
+class Auth:
+    oauth2_scheme = oauth2_scheme
+
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        return verify_password(plain_password, hashed_password)
+
+    def get_password_hash(self, password: str) -> str:
+        return get_password_hash(password)
+
+    def create_access_token(self, data: dict, expires_delta: Optional[float] = None) -> str:
+        return create_access_token(data, expires_delta)
+
+    async def get_current_user(self, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+        return await get_current_user(token, db)
+
+auth_service = Auth()

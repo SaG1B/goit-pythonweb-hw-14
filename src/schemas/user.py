@@ -1,29 +1,26 @@
-from pydantic import BaseModel, EmailStr
-from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, ConfigDict, EmailStr
 
-
-class Role(str, Enum):
-    admin = "admin"
-    moderator = "moderator"
-    user = "user"
-
-
-class UserCreate(BaseModel):
+class UserModel(BaseModel):
     username: str
     email: EmailStr
     password: str
 
+# Псевдоніми для сумісності
+UserSchema = UserModel
+UserCreate = UserModel
 
 class UserResponse(BaseModel):
     id: int
     username: str
     email: EmailStr
-    role: Role
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
-
-class Token(BaseModel):
+class TokenModel(BaseModel):
     access_token: str
-    token_type: str
+    token_type: str = "bearer"
+
+# Псевдоніми для сумісності з тестами
+Token = TokenModel
+TokenResponse = TokenModel
