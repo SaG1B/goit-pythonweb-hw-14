@@ -36,7 +36,6 @@ async def create_photo(
             detail="File is required"
         )
 
-    public_id = None
     try:
         upload_result = cloudinary.uploader.upload(
             upload_file.file, 
@@ -45,10 +44,10 @@ async def create_photo(
         photo_url = upload_result.get("secure_url")
         public_id = upload_result.get("public_id")
     except Exception as e:
-        # Для тестового середовища (pytest), коли Cloudinary API ключі недоступні або фейкові
-        filename = getattr(upload_file, "filename", "photo.jpg") or "photo.jpg"
-        photo_url = f"https://res.cloudinary.com/{settings.cloudinary_name or 'cloud'}/image/upload/v1/{filename}"
-        public_id = f"photoshare/{filename}"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=f"Cloudinary upload error: {str(e)}"
+        )
 
     return repository_photos.create_photo(
         db=db, 
